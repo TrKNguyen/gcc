@@ -1143,7 +1143,7 @@ expand_doubleword_mod (machine_mode mode, rtx op0, rtx op1, bool unsignedp)
 	}
       rtx remainder = expand_divmod (1, TRUNC_MOD_EXPR, word_mode, sum,
 				     gen_int_mode (INTVAL (op1), word_mode),
-				     NULL_RTX, 1, OPTAB_DIRECT);
+				     NULL_RTX, 1, -1, OPTAB_DIRECT);
       if (remainder == NULL_RTX)
 	return NULL_RTX;
 
@@ -1246,7 +1246,7 @@ expand_doubleword_divmod (machine_mode mode, rtx op0, rtx op1, rtx *rem,
   if (op11 != const1_rtx)
     {
       rtx rem2 = expand_divmod (1, TRUNC_MOD_EXPR, mode, quot1, op11,
-				NULL_RTX, unsignedp, OPTAB_DIRECT);
+				NULL_RTX, unsignedp, -1, OPTAB_DIRECT);
       if (rem2 == NULL_RTX)
 	return NULL_RTX;
 
@@ -1261,7 +1261,7 @@ expand_doubleword_divmod (machine_mode mode, rtx op0, rtx op1, rtx *rem,
 	return NULL_RTX;
 
       rtx quot2 = expand_divmod (0, TRUNC_DIV_EXPR, mode, quot1, op11,
-				 NULL_RTX, unsignedp, OPTAB_DIRECT);
+				 NULL_RTX, unsignedp, -1, OPTAB_DIRECT);
       if (quot2 == NULL_RTX)
 	return NULL_RTX;
 

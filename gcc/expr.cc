@@ -8847,16 +8847,16 @@ force_operand (rtx value, rtx target)
 	    return expand_divmod (0,
 				  FLOAT_MODE_P (GET_MODE (value))
 				  ? RDIV_EXPR : TRUNC_DIV_EXPR,
-				  GET_MODE (value), op1, op2, target, 0);
+				  GET_MODE (value), op1, op2, target, 0, -1);
 	case MOD:
 	  return expand_divmod (1, TRUNC_MOD_EXPR, GET_MODE (value), op1, op2,
-				target, 0);
+				target, 0, -1);
 	case UDIV:
 	  return expand_divmod (0, TRUNC_DIV_EXPR, GET_MODE (value), op1, op2,
-				target, 1);
+				target, 1, -1);
 	case UMOD:
 	  return expand_divmod (1, TRUNC_MOD_EXPR, GET_MODE (value), op1, op2,
-				target, 1);
+				target, 1, -1);
 	case ASHIFTRT:
 	  return expand_simple_binop (GET_MODE (value), code, op1, op2,
 				      target, 0, OPTAB_LIB_WIDEN);
@@ -9823,6 +9823,35 @@ near_pow2_divisor_range_p (tree op, wide_int &lower)
 	  && (wi::popcount (lower) == 1 || wi::popcount (upper) == 1));
 }
 
+/* Determine the value range of OP at the current statement.
+   Returns true if range is known, stores bounds in MIN_VAL and MAX_VAL.  */
+
+static bool
+determine_value_range (tree op, wide_int *min_val, wide_int *max_val)
+{
+  if (!currently_expanding_gimple_stmt)
+    return false;
+
+  if (TREE_CODE (op) != SSA_NAME)
+    return false;
+
+  tree type = TREE_TYPE (op);
+  if (!INTEGRAL_TYPE_P (type))
+    return false;
+
+  int_range_max r;
+  if (!get_range_query (cfun)->range_of_expr (r, op,
+					      currently_expanding_gimple_stmt))
+    return false;
+
+  if (r.undefined_p () || r.varying_p ())
+    return false;
+
+  *min_val = r.lower_bound ();
+  *max_val = r.upper_bound ();
+  return true;
+}
+
 /* Helper function of expand_expr_2, expand a division or modulo.
    op0 and op1 should be already expanded treeop0 and treeop1, using
    expand_operands.  */
@@ -9856,9 +9885,9 @@ expand_expr_divmod (tree_code code, machine_mode mode, tree treeop0,
       do_pending_stack_adjust ();
       start_sequence ();
       rtx q_lower = expand_divmod (0, TRUNC_DIV_EXPR, mode, op0, op_lower,
-				   NULL_RTX, unsignedp);
+				   NULL_RTX, unsignedp, -1);
       rtx q_upper = expand_divmod (0, TRUNC_DIV_EXPR, mode, op0, op_upper,
-				   NULL_RTX, unsignedp);
+				   NULL_RTX, unsignedp, -1);
       rtx split_ret
 	= emit_conditional_move (target, { EQ, op1, op_lower, int_mode },
 				 q_lower, q_upper, int_mode, unsignedp);
@@ -9874,6 +9903,34 @@ expand_expr_divmod (tree_code code, machine_mode mode, tree treeop0,
 	}
     }
 
+  /* Calculate dividend precision from value range if available.  */
+  int dividend_prec = -1;
+
+  if (SCALAR_INT_MODE_P (mode)
+      && optimize >= 2
+      && TREE_CODE (treeop1) == INTEGER_CST)
+    {
+      wide_int min_val, max_val;
+      if (determine_value_range (treeop0, &min_val, &max_val))
+	{
+	  if (unsignedp || wi::ges_p (min_val, 0))
+	    {
+	      /* Unsigned or known non-negative: precision from upper bound.  */
+	      dividend_prec = wi::min_precision (max_val, UNSIGNED);
+	    }
+	  else
+	    {
+	      /* Signed with possible negative values.  Take the unsigned
+		 precision of the larger of -(min + 1) and max (or just
+		 -(min + 1) when max < 0, since -(min + 1) dominates then).  */
+	      wide_int neg_side = -(min_val + 1);
+	      wide_int pos_side = wi::ges_p (max_val, 0) ? max_val : neg_side;
+	      wide_int worst = wi::umax (neg_side, pos_side);
+	      dividend_prec = wi::min_precision (worst, UNSIGNED);
+	    }
+	}
+    }
+
   if (SCALAR_INT_MODE_P (mode)
       && optimize >= 2
       && get_range_pos_neg (treeop0, currently_expanding_gimple_stmt) == 1
@@ -9884,10 +9941,12 @@ expand_expr_divmod (tree_code code, machine_mode mode, tree treeop0,
 	 division or modulo.  Choose the cheaper sequence in that case.  */
       do_pending_stack_adjust ();
       start_sequence ();
-      rtx uns_ret = expand_divmod (mod_p, code, mode, op0, op1, target, 1);
+      rtx uns_ret = expand_divmod (mod_p, code, mode, op0, op1, target, 1,
+				   dividend_prec);
       rtx_insn *uns_insns = end_sequence ();
       start_sequence ();
-      rtx sgn_ret = expand_divmod (mod_p, code, mode, op0, op1, target, 0);
+      rtx sgn_ret = expand_divmod (mod_p, code, mode, op0, op1, target, 0,
+				   dividend_prec);
       rtx_insn *sgn_insns = end_sequence ();
       unsigned uns_cost = seq_cost (uns_insns, speed_p);
       unsigned sgn_cost = seq_cost (sgn_insns, speed_p);
@@ -9915,7 +9974,8 @@ expand_expr_divmod (tree_code code, machine_mode mode, tree treeop0,
       emit_insn (sgn_insns);
       return sgn_ret;
     }
-  return expand_divmod (mod_p, code, mode, op0, op1, target, unsignedp);
+  return expand_divmod (mod_p, code, mode, op0, op1, target, unsignedp,
+			dividend_prec);
 }
 
 /* Return true if EXP has a range of values [0..1], false

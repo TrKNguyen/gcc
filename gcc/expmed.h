@@ -713,7 +713,8 @@ extern rtx maybe_expand_shift (enum tree_code, machine_mode, rtx, int, rtx,
 			       int);
 #ifdef GCC_OPTABS_H
 extern rtx expand_divmod (int, enum tree_code, machine_mode, rtx, rtx,
-			  rtx, int, enum optab_methods = OPTAB_LIB_WIDEN);
+			  rtx, int, int,
+			  enum optab_methods = OPTAB_LIB_WIDEN);
 #endif
 #endif
 

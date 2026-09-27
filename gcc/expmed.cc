@@ -3796,6 +3796,15 @@ expand_widening_mult (machine_mode mode, rtx op0, rtx op1, rtx target,
 		       unsignedp, OPTAB_LIB_WIDEN);
 }
 
+/* For any x satisfying 0 <= x < 2^PRECISION, this function picks
+   integers M and K satisfying
+
+   floor (x / D)  =  floor ((x * M) / 2^K)
+
+   so an unsigned divide by the constant D can be replaced by one
+   multiply and one right shift.  K is internal, recovered from the outputs as
+   K = N + (*POST_SHIFT_PTR).  */
+
 /* Choose a minimal N + 1 bit approximation to 2**K / D that can be used to
    replace division by D, put the least significant N bits of the result in
    *MULTIPLIER_PTR, the value K - N in *POST_SHIFT_PTR, and return the most
@@ -4307,6 +4316,20 @@ expand_sdiv_pow2 (scalar_int_mode mode, rtx op0, HOST_WIDE_INT d)
   return expand_shift (RSHIFT_EXPR, mode, temp, logd, NULL_RTX, 0);
 }
 
+/* Return the precision to pass to choose_multiplier.  When DIVIDEND_PREC
+   is non-negative, use it as the value-range-derived precision, raised
+   to at least LGUP since choose_multiplier asserts lgup <= precision.
+   When -1, the value range was not used; return DEFAULT_PREC.  By
+   construction in the caller, DIVIDEND_PREC never exceeds DEFAULT_PREC.  */
+
+static inline int
+adjusted_dividend_prec (int dividend_prec, int default_prec, int lgup)
+{
+  if (dividend_prec >= 0)
+    return dividend_prec < lgup ? lgup : dividend_prec;
+  return default_prec;
+}
+
 /* Emit the code to divide OP0 by OP1, putting the result in TARGET
    if that is convenient, and returning where the result is.
    You may request either the quotient or the remainder as the result;
@@ -4411,7 +4434,7 @@ expand_wide_mulh_udiv (scalar_int_mode int_mode, rtx op0,
 rtx
 expand_divmod (int rem_flag, enum tree_code code, machine_mode mode,
 	       rtx op0, rtx op1, rtx target, int unsignedp,
-	       enum optab_methods methods)
+	       int dividend_prec, enum optab_methods methods)
 {
   machine_mode compute_mode;
   rtx tquotient;
@@ -4653,7 +4676,12 @@ expand_divmod (int rem_flag, enum tree_code code, machine_mode mode,
 		      {
 			/* Find a suitable multiplier and right shift count
 			   instead of directly dividing by D.  */
-			mh = choose_multiplier (d, size, size,
+
+			/* Use reduced precision if range info available.  */
+			int prec = adjusted_dividend_prec (dividend_prec, size,
+							   ceil_log2 (d));
+
+			mh = choose_multiplier (d, size, prec,
 						&ml, &post_shift);
 
 			/* If the suggested multiplier is more than SIZE bits,
@@ -4662,6 +4690,9 @@ expand_divmod (int rem_flag, enum tree_code code, machine_mode mode,
 			if (mh != 0 && (d & 1) == 0)
 			  {
 			    pre_shift = ctz_or_zero (d);
+
+			    /* Only reached when the prior call used full SIZE,
+			       so DIVIDEND_PREC here is saturated.  */
 			    mh = choose_multiplier (d >> pre_shift, size,
 						    size - pre_shift,
 						    &ml, &post_shift);
@@ -4816,7 +4847,7 @@ expand_divmod (int rem_flag, enum tree_code code, machine_mode mode,
 						int_mode, op0,
 						gen_int_mode (abs_d,
 							      int_mode),
-						NULL_RTX, 0);
+						NULL_RTX, 0, -1);
 		    else
 		      quotient = expand_sdiv_pow2 (int_mode, op0, abs_d);
 
@@ -4841,8 +4872,12 @@ expand_divmod (int rem_flag, enum tree_code code, machine_mode mode,
 		  }
 		else if (size <= HOST_BITS_PER_WIDE_INT)
 		  {
-		    choose_multiplier (abs_d, size, size - 1,
+		    int prec = adjusted_dividend_prec (dividend_prec, size - 1,
+						       ceil_log2 (abs_d));
+
+		    choose_multiplier (abs_d, size, prec,
 				       &ml, &post_shift);
+
 		    if (ml < HOST_WIDE_INT_1U << (size - 1))
 		      {
 			rtx t1, t2, t3;
@@ -4962,7 +4997,10 @@ expand_divmod (int rem_flag, enum tree_code code, machine_mode mode,
 		  {
 		    rtx t1, t2, t3, t4;
 
-		    mh = choose_multiplier (d, size, size - 1,
+		    int prec = adjusted_dividend_prec (dividend_prec, size - 1,
+						       ceil_log2 (d));
+
+		    mh = choose_multiplier (d, size, prec,
 					    &ml, &post_shift);
 		    gcc_assert (!mh);
 
@@ -5004,7 +5042,7 @@ expand_divmod (int rem_flag, enum tree_code code, machine_mode mode,
 		t3 = force_operand (gen_rtx_MINUS (int_mode, t1, nsign),
 				    NULL_RTX);
 		t4 = expand_divmod (0, TRUNC_DIV_EXPR, int_mode, t3, op1,
-				    NULL_RTX, 0);
+				    NULL_RTX, 0, -1);
 		if (t4)
 		  {
 		    rtx t5;
